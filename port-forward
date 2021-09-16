@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+CLEAR='\033[0m'
+RED='\033[0;31m'
+
+function usage() {
+  if [ $# -gt 0 ]; then
+    echo -e "${RED}👉 $1${CLEAR}";
+    echo
+  fi
+
+  local program
+  program="$(basename "$0")"
+
+  log "Forward one or more local ports to a remote machine using SSH."
+  log
+  log "Usage: $program [OPTIONS] [COMMAND] [LOCAL_PORT:]REMOTE_PORT [...[LOCAL_PORT_N:]REMOTE_PORT_N]"
+  log
+  log "Commands:"
+  log "  start                     Starts port forwarding (Default)."
+  log "  stop                      Stops port forwarding."
+  log "  help                      Print this message."
+  log
+  log "Options:"
+  log "  -c, --command             SSH command, defaults to 'ssh'. Supports PORT_FORWARD_COMMAND env var."
+  log "  -d, --dry-run             Don't do anything, just print the command."
+  log "  -f, --foreground          Open the tunnels in the foreground."
+  log "  -h, --host                Specify the hostname, defaults to 'default'. Supports PORT_FORWARD_HOST env var."
+  log
+  log "Examples"
+  log "  # Listen on ports 5000 and 6000 locally, forwarding data to/from ports 5000 and 6000 on the machine"
+  log "  $program 5000 6000"
+  log
+  log "  # Listen on port 8888 locally, forwarding to 5000 on the machine"
+  log "  $program 8888:5000"
+  log
+  log "  # Change the ssh command, e.g. when using docker-machine:"
+  log "  $program -c 'docker-machine ssh' 8080"
+  log
+  log "  # Listen in the foreground, i.e. block"
+  log "  $program -f 8080"
+  log
+
+  exit 1
+}
+
+start() {
+  set -euo pipefail
+
+  local args
+  args=${tunnels// / -L }
+
+  if $detach; then
+    args="-f -N -M -S $(socket) $args"
+  fi
+
+  log "Starting tunnel..."
+  # shellcheck disable=SC2086
+  run $args
+}
+
+stop() {
+  set -euo pipefail
+
+  local socket
+  socket=$(socket)
+
+  if [ -f "$socket" ]; then
+    log "Stopping tunnel..."
+    run -S "$socket" -O exit
+  else
+    log "Tunnel not found, noting to do."
+  fi
+}
+
+log() {
+  >&2 echo "$@"
+}
+
+socket() {
+  set -euo pipefail
+
+  echo "$(echo -n "$tunnels" | sha256 | grep -oE '^.{7}' | head -n1).socket"
+}
+
+sha256() {
+  set -euo pipefail
+
+  if type sha256sum > /dev/null; then
+    # Linux
+    sha256sum
+  elif type shasum > /dev/null; then
+    # MacOS
+    shasum --algorithm 256
+  else
+    usage "Missing sha256sum/shasum"
+  fi
+}
+
+run() {
+  set -euo pipefail
+
+  local args
+  args=$(join ' ' $ssh "$hostname" "$@")
+
+  if $dry_run; then
+    log "$args"
+  else
+    eval $args
+  fi
+}
+
+join() {
+  set -euo pipefail
+
+  local IFS="$1"
+  shift
+  echo "$*"
+}
+
+ssh=${PORT_FORWARD_COMMAND:-ssh}
+command=start
+dry_run=false
+hostname=${PORT_FORWARD_HOST:-default}
+detach=true
+tunnels=
+
+shopt -s extglob
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    start) command=start;;
+    stop) command=stop;;
+    help) usage;;
+    -c|--command) ssh=$2; shift;;
+    -d|--dry-run) dry_run=true;;
+    -f|--foreground) detach=false;;
+    -h|--host) hostname=$2; shift;;
+    +([0-9]):+([0-9])) tunnels="$tunnels ${1//:/:localhost:}";;
+    +([0-9])) tunnels="$tunnels $1:localhost:$1";;
+    *) usage "Unknown parameter passed: $1";
+  esac
+  shift
+done
+
+if [ -z "$tunnels" ]; then
+  usage "No ports specified"
+fi
+
+$command
